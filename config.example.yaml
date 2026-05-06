@@ -1,0 +1,39 @@
+mode: simulation        # "simulation" (quote-only) | "simulate-tx" (signed + simulated on-chain) | "live" (sent on-chain)
+
+helius:
+  ws_url: "wss://mainnet.helius-rpc.com"   # standard Solana JSON-RPC websocket
+  rpc_url: "https://mainnet.helius-rpc.com"
+  # api_key is read from env: HELIUS_API_KEY
+
+wallet:
+  follow: "REPLACE_WITH_WALLET_ADDRESS_TO_FOLLOW"
+  # bot's private key is read from env: BOT_PRIVATE_KEY (base58, only used in live mode)
+
+trading:
+  position_size_ratio: 0.10     # bot spends 1/10 of follow wallet's SOL per buy
+  ladder_step_pct: 10           # +10% per step
+  ladder_step_count: 9          # 9 sells of 10% each; last 10% reserved for wallet exit
+  slippage_bps: 500             # 5%
+  priority_fee_microlamports: 100000
+  min_position_sol: 0.01        # skip below this
+  max_position_sol: 5.0         # cap above this
+  excluded_mints:
+    - "So11111111111111111111111111111111111111112"  # wSOL
+    - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+    - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+
+price:
+  poll_interval_seconds: 5
+  jupiter_quote_url: "https://lite-api.jup.ag/swap/v1/quote"
+  jupiter_swap_url: "https://lite-api.jup.ag/swap/v1/swap"
+
+telegram:
+  enabled: true
+  # bot_token is read from env: TELEGRAM_BOT_TOKEN
+  # owner_id  is read from env: TELEGRAM_OWNER_ID (numeric Telegram user id)
+
+storage:
+  db_path: "./bot.db"
+
+log:
+  level: "info"                 # debug | info | warn | error
