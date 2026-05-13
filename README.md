@@ -151,6 +151,7 @@ and runs as an unprivileged user. The image expects a SQLite path at `/data`
    | Name | Required | Notes |
    |---|---|---|
    | `HELIUS_API_KEY` | yes | Helius RPC API key |
+   | `JUPITER_API_KEY` | no | from portal.jup.ag — required if using `api.jup.ag` URLs for higher rate limits |
    | `WALLET_FOLLOW` | yes | Solana wallet address to mirror |
    | `MODE` | no | `simulation` (default) / `simulate-tx` / `live` |
    | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |

@@ -34,6 +34,7 @@ type Quote struct {
 type Client struct {
 	quoteURL string
 	swapURL  string
+	apiKey   string
 	http     *http.Client
 }
 
@@ -43,6 +44,14 @@ func New(quoteURL, swapURL string) *Client {
 		swapURL:  swapURL,
 		http:     &http.Client{Timeout: 15 * time.Second},
 	}
+}
+
+// WithAPIKey enables authenticated access (api.jup.ag) by attaching the
+// x-api-key header to every request. The lite-api endpoint ignores the header,
+// so passing an empty key is a no-op.
+func (c *Client) WithAPIKey(key string) *Client {
+	c.apiKey = key
+	return c
 }
 
 // QuoteSellToSOL returns a quote for selling tokenRawAmount of `mint` to SOL.
@@ -66,22 +75,9 @@ func (c *Client) quote(ctx context.Context, inMint, outMint string, inAmount uin
 	q.Set("asLegacyTransaction", "false")
 
 	reqURL := c.quoteURL + "?" + q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http.Do(req)
+	body, err := c.doWithRetry(ctx, http.MethodGet, reqURL, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("jupiter quote: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jupiter quote status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var raw struct {
@@ -118,12 +114,12 @@ func (c *Client) quote(ctx context.Context, inMint, outMint string, inAmount uin
 // given quote and user public key.
 func (c *Client) SwapTransaction(ctx context.Context, quote *Quote, userPubkey string, priorityFeeMicroLamports uint64) (string, error) {
 	type swapReq struct {
-		QuoteResponse                 json.RawMessage `json:"quoteResponse"`
-		UserPublicKey                 string          `json:"userPublicKey"`
-		WrapAndUnwrapSOL              bool            `json:"wrapAndUnwrapSol"`
-		DynamicComputeUnitLimit       bool            `json:"dynamicComputeUnitLimit"`
-		PrioritizationFeeLamports     any             `json:"prioritizationFeeLamports,omitempty"`
-		AsLegacyTransaction           bool            `json:"asLegacyTransaction"`
+		QuoteResponse             json.RawMessage `json:"quoteResponse"`
+		UserPublicKey             string          `json:"userPublicKey"`
+		WrapAndUnwrapSOL          bool            `json:"wrapAndUnwrapSol"`
+		DynamicComputeUnitLimit   bool            `json:"dynamicComputeUnitLimit"`
+		PrioritizationFeeLamports any             `json:"prioritizationFeeLamports,omitempty"`
+		AsLegacyTransaction       bool            `json:"asLegacyTransaction"`
 	}
 	type prioFee struct {
 		PriorityLevel string `json:"priorityLevel"`
@@ -148,19 +144,9 @@ func (c *Client) SwapTransaction(ctx context.Context, quote *Quote, userPubkey s
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.swapURL, bytes.NewReader(buf))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	respBody, err := c.doWithRetry(ctx, http.MethodPost, c.swapURL, buf, "application/json")
 	if err != nil {
 		return "", fmt.Errorf("jupiter swap: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("jupiter swap status %d: %s", resp.StatusCode, string(respBody))
 	}
 	var out struct {
 		SwapTransaction string `json:"swapTransaction"`
@@ -172,6 +158,65 @@ func (c *Client) SwapTransaction(ctx context.Context, quote *Quote, userPubkey s
 		return "", fmt.Errorf("jupiter swap: empty swapTransaction (body=%s)", string(respBody))
 	}
 	return out.SwapTransaction, nil
+}
+
+// doWithRetry runs an HTTP request and retries on 429 / 5xx with exponential
+// backoff. Returns the response body bytes on 2xx.
+func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, body []byte, contentType string) ([]byte, error) {
+	const maxAttempts = 4
+	backoff := 700 * time.Millisecond
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var reqBody io.Reader
+		if body != nil {
+			reqBody = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
+		if err != nil {
+			return nil, err
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		if c.apiKey != "" {
+			req.Header.Set("x-api-key", c.apiKey)
+		}
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return respBody, nil
+			}
+			// Retry on 429 or 5xx; surface anything else immediately.
+			retryable := resp.StatusCode == http.StatusTooManyRequests ||
+				(resp.StatusCode >= 500 && resp.StatusCode < 600)
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, string(respBody))
+			if !retryable {
+				return nil, lastErr
+			}
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+		// Backoff with a small ceiling so we don't outlive a wallet's pump.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+	}
+	return nil, lastErr
 }
 
 // PriceSOLPerToken converts a sell-quote into a SOL-per-1-token price.

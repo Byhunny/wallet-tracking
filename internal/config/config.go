@@ -36,6 +36,7 @@ type Config struct {
 
 	// Loaded from env, not yaml.
 	HeliusAPIKey     string `yaml:"-"`
+	JupiterAPIKey    string `yaml:"-"`
 	BotPrivateKey    string `yaml:"-"`
 	TelegramBotToken string `yaml:"-"`
 	TelegramOwnerID  int64  `yaml:"-"`
@@ -90,6 +91,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	c.HeliusAPIKey = strings.TrimSpace(os.Getenv("HELIUS_API_KEY"))
+	c.JupiterAPIKey = strings.TrimSpace(os.Getenv("JUPITER_API_KEY"))
 	c.BotPrivateKey = strings.TrimSpace(os.Getenv("BOT_PRIVATE_KEY"))
 	c.TelegramBotToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 

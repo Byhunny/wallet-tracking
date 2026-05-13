@@ -24,6 +24,8 @@ trading:
 
 price:
   poll_interval_seconds: 5
+  # lite-api is keyless but rate-limited (~1 req/sec). For heavier traffic
+  # set JUPITER_API_KEY env and swap these to https://api.jup.ag/swap/v1/...
   jupiter_quote_url: "https://lite-api.jup.ag/swap/v1/quote"
   jupiter_swap_url: "https://lite-api.jup.ag/swap/v1/swap"
 

@@ -43,7 +43,11 @@ func main() {
 		log.Info("closed dust positions on startup", "count", n)
 	}
 
-	jup := pricefeed.New(cfg.Price.JupiterQuoteURL, cfg.Price.JupiterSwapURL)
+	jup := pricefeed.New(cfg.Price.JupiterQuoteURL, cfg.Price.JupiterSwapURL).
+		WithAPIKey(cfg.JupiterAPIKey)
+	if cfg.JupiterAPIKey != "" {
+		log.Info("jupiter api key loaded — using authenticated endpoint")
+	}
 
 	var exec executor.Executor
 	var botPub string
