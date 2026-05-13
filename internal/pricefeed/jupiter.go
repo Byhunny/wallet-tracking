@@ -46,9 +46,9 @@ func New(quoteURL, swapURL string) *Client {
 	}
 }
 
-// WithAPIKey enables authenticated access (api.jup.ag) by attaching the
-// x-api-key header to every request. The lite-api endpoint ignores the header,
-// so passing an empty key is a no-op.
+// WithAPIKey enables authenticated access (api.jup.ag) by attaching an
+// `Authorization: Bearer <key>` header to every request. Passing an empty
+// key is a no-op (request goes through unauthenticated).
 func (c *Client) WithAPIKey(key string) *Client {
 	c.apiKey = key
 	return c
@@ -180,7 +180,7 @@ func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, body []
 			req.Header.Set("Content-Type", contentType)
 		}
 		if c.apiKey != "" {
-			req.Header.Set("x-api-key", c.apiKey)
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		}
 
 		resp, err := c.http.Do(req)
