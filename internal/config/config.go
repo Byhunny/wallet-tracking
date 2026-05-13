@@ -95,6 +95,15 @@ func Load(path string) (*Config, error) {
 	c.BotPrivateKey = strings.TrimSpace(os.Getenv("BOT_PRIVATE_KEY"))
 	c.TelegramBotToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 
+	// When a Jupiter API key is present, swap any lite-api URLs to api.jup.ag.
+	// The key is useless on lite-api and required on api.jup.ag, so this
+	// avoids surprises for users who set JUPITER_API_KEY but kept the default
+	// lite-api URLs.
+	if c.JupiterAPIKey != "" {
+		c.Price.JupiterQuoteURL = strings.ReplaceAll(c.Price.JupiterQuoteURL, "lite-api.jup.ag", "api.jup.ag")
+		c.Price.JupiterSwapURL = strings.ReplaceAll(c.Price.JupiterSwapURL, "lite-api.jup.ag", "api.jup.ag")
+	}
+
 	// Optional env overrides — handy for container deploys (Zeabur etc.) where
 	// editing config.yaml is awkward.
 	if v := strings.TrimSpace(os.Getenv("WALLET_FOLLOW")); v != "" {
