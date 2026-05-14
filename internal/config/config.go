@@ -51,15 +51,43 @@ type WalletConfig struct {
 	Follow string `yaml:"follow"`
 }
 
+// LadderStep is one rung of the take-profit ladder. At gets compared against
+// the current gain in percent (10 = +10% from entry); Sell is the percent of
+// the INITIAL position to liquidate when this rung fires.
+type LadderStep struct {
+	At   float64 `yaml:"at"`
+	Sell float64 `yaml:"sell"`
+}
+
 type TradingConfig struct {
-	PositionSizeRatio       float64  `yaml:"position_size_ratio"`
-	LadderStepPct           float64  `yaml:"ladder_step_pct"`
-	LadderStepCount         int      `yaml:"ladder_step_count"`
-	SlippageBPS             int      `yaml:"slippage_bps"`
-	PriorityFeeMicroLamports uint64  `yaml:"priority_fee_microlamports"`
-	MinPositionSOL          float64  `yaml:"min_position_sol"`
-	MaxPositionSOL          float64  `yaml:"max_position_sol"`
-	ExcludedMints           []string `yaml:"excluded_mints"`
+	PositionSizeRatio        float64      `yaml:"position_size_ratio"`
+	// FixedPositionSOL, when > 0, overrides PositionSizeRatio: every wallet
+	// buy gets the same fixed SOL spend regardless of how much the followed
+	// wallet bought. Min/max position filters are bypassed in this mode.
+	FixedPositionSOL float64      `yaml:"fixed_position_sol"`
+	Ladder           []LadderStep `yaml:"ladder"`
+	// StopLossPct triggers a full exit when the unrealized loss reaches this
+	// percent (10 = -10%). 0 disables stop-loss.
+	StopLossPct float64 `yaml:"stop_loss_pct"`
+	// TrailingStopPct sells everything remaining when the price drops this
+	// percent from the position's peak (25 = -25% from peak). 0 disables.
+	TrailingStopPct float64 `yaml:"trailing_stop_pct"`
+	// TrailingArmAtPct gates the trailing stop: it activates only once the
+	// peak gain (peak/entry - 1)*100 reaches this threshold. Stops trailing
+	// from firing on entry-time wobble. Set 0 to arm immediately.
+	TrailingArmAtPct float64 `yaml:"trailing_arm_at_pct"`
+	// IgnoreWalletExit decouples our exit from the followed wallet's: when
+	// true, a wallet sell-out only emits a notification and we keep running
+	// our own ladder/stop-loss until they fire.
+	IgnoreWalletExit bool `yaml:"ignore_wallet_exit"`
+	// Legacy linear ladder — used only when `ladder` is not set.
+	LadderStepPct            float64  `yaml:"ladder_step_pct"`
+	LadderStepCount          int      `yaml:"ladder_step_count"`
+	SlippageBPS              int      `yaml:"slippage_bps"`
+	PriorityFeeMicroLamports uint64   `yaml:"priority_fee_microlamports"`
+	MinPositionSOL           float64  `yaml:"min_position_sol"`
+	MaxPositionSOL           float64  `yaml:"max_position_sol"`
+	ExcludedMints            []string `yaml:"excluded_mints"`
 }
 
 type PriceConfig struct {
@@ -141,14 +169,58 @@ func (c *Config) validate() error {
 	if c.Wallet.Follow == "" || strings.HasPrefix(c.Wallet.Follow, "REPLACE_") {
 		return fmt.Errorf("wallet.follow must be set in config")
 	}
-	if c.Trading.PositionSizeRatio <= 0 || c.Trading.PositionSizeRatio > 1 {
-		return fmt.Errorf("trading.position_size_ratio must be in (0,1]")
+	if c.Trading.FixedPositionSOL < 0 {
+		return fmt.Errorf("trading.fixed_position_sol must be >= 0")
 	}
-	if c.Trading.LadderStepCount < 1 {
-		return fmt.Errorf("trading.ladder_step_count must be >= 1")
+	if c.Trading.FixedPositionSOL == 0 {
+		// Ratio-based sizing path: validate the ratio.
+		if c.Trading.PositionSizeRatio <= 0 || c.Trading.PositionSizeRatio > 1 {
+			return fmt.Errorf("trading.position_size_ratio must be in (0,1] when fixed_position_sol is 0")
+		}
 	}
-	if c.Trading.LadderStepPct <= 0 {
-		return fmt.Errorf("trading.ladder_step_pct must be > 0")
+	if len(c.Trading.Ladder) == 0 {
+		// Build legacy linear ladder for backward compatibility.
+		if c.Trading.LadderStepCount < 1 {
+			return fmt.Errorf("trading.ladder or trading.ladder_step_count must be set")
+		}
+		if c.Trading.LadderStepPct <= 0 {
+			return fmt.Errorf("trading.ladder_step_pct must be > 0 with linear ladder")
+		}
+		slicePct := 100.0 / float64(c.Trading.LadderStepCount+1)
+		for i := 1; i <= c.Trading.LadderStepCount; i++ {
+			c.Trading.Ladder = append(c.Trading.Ladder, LadderStep{
+				At:   c.Trading.LadderStepPct * float64(i),
+				Sell: slicePct,
+			})
+		}
+	}
+	// Validate ladder shape.
+	var totalSell float64
+	var prevAt float64
+	for i, s := range c.Trading.Ladder {
+		if s.At <= 0 {
+			return fmt.Errorf("trading.ladder[%d].at must be > 0", i)
+		}
+		if s.Sell <= 0 || s.Sell > 100 {
+			return fmt.Errorf("trading.ladder[%d].sell must be in (0,100]", i)
+		}
+		if s.At <= prevAt {
+			return fmt.Errorf("trading.ladder[%d].at (%.2f) must be greater than previous (%.2f)", i, s.At, prevAt)
+		}
+		prevAt = s.At
+		totalSell += s.Sell
+	}
+	if totalSell > 100.0+1e-6 {
+		return fmt.Errorf("trading.ladder sell percentages sum to %.2f, must be <= 100", totalSell)
+	}
+	if c.Trading.StopLossPct < 0 || c.Trading.StopLossPct > 100 {
+		return fmt.Errorf("trading.stop_loss_pct must be in [0,100], got %.2f", c.Trading.StopLossPct)
+	}
+	if c.Trading.TrailingStopPct < 0 || c.Trading.TrailingStopPct > 100 {
+		return fmt.Errorf("trading.trailing_stop_pct must be in [0,100], got %.2f", c.Trading.TrailingStopPct)
+	}
+	if c.Trading.TrailingArmAtPct < 0 {
+		return fmt.Errorf("trading.trailing_arm_at_pct must be >= 0")
 	}
 	if c.Trading.SlippageBPS < 0 || c.Trading.SlippageBPS > 10000 {
 		return fmt.Errorf("trading.slippage_bps must be in [0,10000]")

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -21,6 +22,7 @@ type Position struct {
 	Symbol          string
 	Decimals        int
 	EntryPriceSOL   float64
+	PeakPriceSOL    float64
 	InitialAmount   float64
 	RemainingAmount float64
 	StepsHit        int
@@ -79,6 +81,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			symbol TEXT,
 			decimals INTEGER NOT NULL DEFAULT 9,
 			entry_price_sol REAL NOT NULL,
+			peak_price_sol REAL NOT NULL DEFAULT 0,
 			initial_amount REAL NOT NULL,
 			remaining_amount REAL NOT NULL,
 			steps_hit INTEGER NOT NULL DEFAULT 0,
@@ -121,6 +124,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// Idempotent column adds for already-existing DBs. SQLite has no IF NOT
+	// EXISTS for ALTER TABLE, so we swallow the duplicate-column error.
+	for _, q := range []string{
+		`ALTER TABLE positions ADD COLUMN peak_price_sol REAL NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("alter: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -148,10 +162,12 @@ func (s *Store) RecordWalletEvent(ctx context.Context, sig, wallet, mint, side s
 func (s *Store) OpenPosition(ctx context.Context, p Position) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO positions
-		 (mint, symbol, decimals, entry_price_sol, initial_amount, remaining_amount,
+		 (mint, symbol, decimals, entry_price_sol, peak_price_sol,
+		  initial_amount, remaining_amount,
 		  steps_hit, wallet_exited, closed, sol_spent, sol_received, opened_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 0, ?)`,
-		p.Mint, p.Symbol, p.Decimals, p.EntryPriceSOL, p.InitialAmount, p.InitialAmount,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 0, ?)`,
+		p.Mint, p.Symbol, p.Decimals, p.EntryPriceSOL, p.EntryPriceSOL,
+		p.InitialAmount, p.InitialAmount,
 		p.SOLSpent, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -162,7 +178,8 @@ func (s *Store) OpenPosition(ctx context.Context, p Position) (int64, error) {
 // ActivePosition returns the currently open position for a mint, or ErrNotFound.
 func (s *Store) ActivePosition(ctx context.Context, mint string) (*Position, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, mint, COALESCE(symbol, ''), decimals, entry_price_sol, initial_amount,
+		SELECT id, mint, COALESCE(symbol, ''), decimals, entry_price_sol,
+		       COALESCE(peak_price_sol, 0), initial_amount,
 		       remaining_amount, steps_hit, wallet_exited, closed,
 		       sol_spent, sol_received, opened_at, closed_at
 		FROM positions
@@ -173,7 +190,8 @@ func (s *Store) ActivePosition(ctx context.Context, mint string) (*Position, err
 
 func (s *Store) ListActivePositions(ctx context.Context) ([]Position, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, mint, COALESCE(symbol, ''), decimals, entry_price_sol, initial_amount,
+		SELECT id, mint, COALESCE(symbol, ''), decimals, entry_price_sol,
+		       COALESCE(peak_price_sol, 0), initial_amount,
 		       remaining_amount, steps_hit, wallet_exited, closed,
 		       sol_spent, sol_received, opened_at, closed_at
 		FROM positions
@@ -203,8 +221,8 @@ func scanPosition(row scannable) (*Position, error) {
 	var openedAt int64
 	var closedAt sql.NullInt64
 	var walletExited, closed int
-	err := row.Scan(&p.ID, &p.Mint, &p.Symbol, &p.Decimals, &p.EntryPriceSOL, &p.InitialAmount,
-		&p.RemainingAmount, &p.StepsHit, &walletExited, &closed,
+	err := row.Scan(&p.ID, &p.Mint, &p.Symbol, &p.Decimals, &p.EntryPriceSOL, &p.PeakPriceSOL,
+		&p.InitialAmount, &p.RemainingAmount, &p.StepsHit, &walletExited, &closed,
 		&p.SOLSpent, &p.SOLReceived, &openedAt, &closedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -277,6 +295,15 @@ func (s *Store) ApplySell(ctx context.Context, positionID int64, tokenSold, solR
 func (s *Store) MarkWalletExited(ctx context.Context, positionID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE positions SET wallet_exited = 1 WHERE id = ?`, positionID)
+	return err
+}
+
+// UpdatePeak ratchets peak_price_sol upward only. No-op when price < peak.
+func (s *Store) UpdatePeak(ctx context.Context, positionID int64, price float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE positions SET peak_price_sol = ?
+		 WHERE id = ? AND ? > peak_price_sol`,
+		price, positionID, price)
 	return err
 }
 

@@ -11,8 +11,30 @@ wallet:
 
 trading:
   position_size_ratio: 0.10     # bot spends 1/10 of follow wallet's SOL per buy
-  ladder_step_pct: 10           # +10% per step
-  ladder_step_count: 9          # 9 sells of 10% each; last 10% reserved for wallet exit
+  # fixed_position_sol: 1.0     # uncomment to use a constant per-buy SOL spend (overrides ratio)
+
+  # Take-profit ladder. List of {at: gain_pct, sell: pct_of_initial} rungs.
+  # Each rung fires once when the threshold is crossed; multiple rungs can
+  # fire on a single price tick if price jumps past several at once.
+  # Wallet exit (if not ignored) sells anything left.
+  ladder:
+    - { at: 10, sell: 10 }
+    - { at: 20, sell: 10 }
+    - { at: 30, sell: 10 }
+    - { at: 40, sell: 10 }
+    - { at: 50, sell: 10 }
+    - { at: 60, sell: 10 }
+    - { at: 70, sell: 10 }
+    - { at: 80, sell: 10 }
+    - { at: 90, sell: 10 }
+    # final 10% is held: trailing_stop or wallet exit will take it
+
+  # Risk controls — tuned from real PnL data (48 trades sample):
+  stop_loss_pct: 20             # exit everything if price drops 20% from entry
+  trailing_stop_pct: 25         # exit everything if price drops 25% from peak…
+  trailing_arm_at_pct: 30       # …once peak gain has cleared +30%
+  ignore_wallet_exit: false     # set true to detach our exit logic from wallet's
+
   slippage_bps: 500             # 5%
   priority_fee_microlamports: 100000
   min_position_sol: 0.01        # skip below this

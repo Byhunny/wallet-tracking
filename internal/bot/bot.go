@@ -192,20 +192,25 @@ func (b *Bot) handleWalletBuy(ctx context.Context, ev *parser.SwapEvent) {
 	}
 
 	walletSpent := -ev.SOLDelta
-	botSOL := walletSpent * b.cfg.Trading.PositionSizeRatio
-	if botSOL < b.cfg.Trading.MinPositionSOL {
-		b.notify(fmt.Sprintf("ℹ️ Wallet alımı çok küçük (%.4f SOL × %.0f%% = %.4f SOL < min). Skip %s.",
-			walletSpent, b.cfg.Trading.PositionSizeRatio*100, botSOL, short(ev.Mint)))
-		return
-	}
-	if botSOL > b.cfg.Trading.MaxPositionSOL {
-		b.log.Warn("capping position size", "want", botSOL, "max", b.cfg.Trading.MaxPositionSOL)
-		botSOL = b.cfg.Trading.MaxPositionSOL
+	var botSOL float64
+	if b.cfg.Trading.FixedPositionSOL > 0 {
+		botSOL = b.cfg.Trading.FixedPositionSOL
+	} else {
+		botSOL = walletSpent * b.cfg.Trading.PositionSizeRatio
+		if botSOL < b.cfg.Trading.MinPositionSOL {
+			b.notify(fmt.Sprintf("ℹ️ Wallet alımı çok küçük (%.4f SOL × %.0f%% = %.4f SOL < min). Skip %s.",
+				walletSpent, b.cfg.Trading.PositionSizeRatio*100, botSOL, short(ev.Mint)))
+			return
+		}
+		if botSOL > b.cfg.Trading.MaxPositionSOL {
+			b.log.Warn("capping position size", "want", botSOL, "max", b.cfg.Trading.MaxPositionSOL)
+			botSOL = b.cfg.Trading.MaxPositionSOL
+		}
 	}
 
 	lamports := uint64(math.Floor(botSOL * 1e9))
 
-	b.notify(fmt.Sprintf("🟢 Wallet BUY %s\nWallet: %.4f SOL → biz %.4f SOL alıyoruz…",
+	b.notify(fmt.Sprintf("🟢 Wallet BUY %s\nWallet: %.4f SOL → biz sabit %.4f SOL alıyoruz…",
 		short(ev.Mint), walletSpent, botSOL))
 
 	fill, err := b.exec.Buy(ctx, ev.Mint, ev.Decimals, lamports, "wallet_buy")
@@ -254,9 +259,17 @@ func (b *Bot) handleWalletSell(ctx context.Context, ev *parser.SwapEvent) {
 		return
 	}
 
-	// Per spec: ignore partial sells. Only trigger our exit on wallet's full exit.
+	// Per spec: ignore partial sells. Only react to wallet's full exit.
 	if !ev.FullExit {
 		b.log.Debug("wallet partial sell ignored", "mint", ev.Mint, "post", ev.PostAmount)
+		return
+	}
+
+	// When ignore_wallet_exit is on, we run our own exit logic (ladder + stop
+	// loss) regardless of what the followed wallet does. Just notify.
+	if b.cfg.Trading.IgnoreWalletExit {
+		b.notify(fmt.Sprintf("ℹ️ Wallet EXIT %s — biz ladder/stop-loss ile devam ediyoruz (ignore_wallet_exit on)",
+			short(ev.Mint)))
 		return
 	}
 
@@ -292,22 +305,52 @@ func (b *Bot) handlePriceTick(ctx context.Context, t priceTick) {
 		return
 	}
 
+	// Ratchet peak upward so trailing stop has a reference point.
+	if t.priceSOL > pos.PeakPriceSOL {
+		if err := b.db.UpdatePeak(ctx, pos.ID, t.priceSOL); err != nil {
+			b.log.Error("update peak", "err", err)
+		}
+		pos.PeakPriceSOL = t.priceSOL
+	}
+
 	action := strategy.Evaluate(strategy.Position{
-		EntryPrice:      pos.EntryPriceSOL,
-		InitialAmount:   pos.InitialAmount,
-		RemainingAmount: pos.RemainingAmount,
-		StepsHit:        pos.StepsHit,
-		LadderStepCount: b.cfg.Trading.LadderStepCount,
-		LadderStepPct:   b.cfg.Trading.LadderStepPct,
-		WalletExited:    pos.WalletExited,
+		EntryPrice:       pos.EntryPriceSOL,
+		PeakPrice:        pos.PeakPriceSOL,
+		InitialAmount:    pos.InitialAmount,
+		RemainingAmount:  pos.RemainingAmount,
+		StepsHit:         pos.StepsHit,
+		Ladder:           b.ladderForStrategy(),
+		WalletExited:     pos.WalletExited,
+		StopLossPct:      b.cfg.Trading.StopLossPct,
+		TrailingStopPct:  b.cfg.Trading.TrailingStopPct,
+		TrailingArmAtPct: b.cfg.Trading.TrailingArmAtPct,
 	}, t.priceSOL)
 
 	switch action.Kind {
 	case strategy.ActionLadderSell:
 		b.executeLadderSell(ctx, pos, action.TokenAmount, action.StepsAdvancing, t.priceSOL)
+	case strategy.ActionStopLoss:
+		b.executeStopLoss(ctx, pos, t.priceSOL)
+	case strategy.ActionTrailingStop:
+		b.executeTrailingStop(ctx, pos, t.priceSOL)
 	case strategy.ActionFinalExit:
 		b.executeFinalExit(ctx, pos, "wallet_exit_followup")
 	}
+}
+
+func (b *Bot) executeStopLoss(ctx context.Context, pos *store.Position, markPrice float64) {
+	lossPct := (markPrice/pos.EntryPriceSOL - 1) * 100
+	b.notify(fmt.Sprintf("🛑 STOP LOSS %s %.1f%% — kalan %.4f tok satılıyor",
+		short(pos.Mint), lossPct, pos.RemainingAmount))
+	b.executeFinalExit(ctx, pos, "stop_loss")
+}
+
+func (b *Bot) executeTrailingStop(ctx context.Context, pos *store.Position, markPrice float64) {
+	peakGainPct := (pos.PeakPriceSOL/pos.EntryPriceSOL - 1) * 100
+	drawdownPct := (1 - markPrice/pos.PeakPriceSOL) * 100
+	b.notify(fmt.Sprintf("🪂 TRAILING STOP %s peak +%.1f%% → drawdown -%.1f%% — kalan %.4f tok satılıyor",
+		short(pos.Mint), peakGainPct, drawdownPct, pos.RemainingAmount))
+	b.executeFinalExit(ctx, pos, "trailing_stop")
 }
 
 func (b *Bot) executeLadderSell(ctx context.Context, pos *store.Position, tokenAmount float64, stepsAdvancing int, markPrice float64) {
@@ -361,7 +404,7 @@ func (b *Bot) executeFinalExit(ctx context.Context, pos *store.Position, reason 
 		b.notify("❌ Final satış hatası: " + err.Error())
 		return
 	}
-	stepsAdvancing := b.cfg.Trading.LadderStepCount + 1 - pos.StepsHit
+	stepsAdvancing := len(b.cfg.Trading.Ladder) + 1 - pos.StepsHit
 	if stepsAdvancing < 0 {
 		stepsAdvancing = 0
 	}
@@ -478,6 +521,16 @@ func pow10(n int) float64 {
 		v *= 10
 	}
 	return v
+}
+
+// ladderForStrategy converts the config-level ladder into the strategy
+// package's LadderStep type. Cheap enough to recompute on every tick.
+func (b *Bot) ladderForStrategy() []strategy.LadderStep {
+	out := make([]strategy.LadderStep, len(b.cfg.Trading.Ladder))
+	for i, s := range b.cfg.Trading.Ladder {
+		out[i] = strategy.LadderStep{ThresholdPct: s.At, SellPct: s.Sell}
+	}
+	return out
 }
 
 // Compile-time assertion: *Bot satisfies telegram.Controller.

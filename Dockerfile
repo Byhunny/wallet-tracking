@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/bot ./c
 
 # --- runtime stage ---
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 bot
+RUN apk add --no-cache ca-certificates tzdata sqlite && adduser -D -u 10001 bot
 WORKDIR /app
 COPY --from=build /out/bot /app/bot
 COPY config.example.yaml /app/config.yaml

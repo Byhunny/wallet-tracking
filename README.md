@@ -162,6 +162,36 @@ and runs as an unprivileged user. The image expects a SQLite path at `/data`
 5. Deploy. The bot starts in simulation mode unless you override `MODE`.
 
 The packaged `config.yaml` (built from `config.example.yaml`) provides safe
-trading defaults — slippage 5%, ladder 9 steps × 10%, min position 0.01 SOL,
-cap 5 SOL. Override what you need via env, or build a custom image with a
-modified config.
+trading defaults — slippage 5%, linear 9-step ladder, stop-loss at -20%,
+trailing stop -25% from peak (armed after +30%). Override what you need via
+env, or build a custom image with a modified config.
+
+### Inspecting the DB from Zeabur shell
+
+The runtime image ships with `sqlite3`. From the Zeabur shell:
+
+```sh
+# Closed trades with PnL
+sqlite3 -header -column /data/bot.db "
+  SELECT id, substr(mint,1,8) AS mint,
+         printf('%.4f', sol_spent) AS spent,
+         printf('%.4f', sol_received) AS recvd,
+         printf('%+.4f', sol_received - sol_spent) AS pnl,
+         steps_hit AS steps,
+         datetime(opened_at,'unixepoch','localtime') AS opened
+  FROM positions WHERE closed = 1 ORDER BY id DESC LIMIT 20;"
+
+# Aggregate stats
+sqlite3 -header -column /data/bot.db "
+  SELECT COUNT(*) AS trades,
+         SUM(sol_received > sol_spent) AS wins,
+         printf('%.4f', SUM(sol_received - sol_spent)) AS net_pnl
+  FROM positions WHERE closed = 1;"
+
+# Recent fills with reason (ladder_step_N, stop_loss, trailing_stop, wallet_exit)
+sqlite3 -header -column /data/bot.db "
+  SELECT t.id, t.position_id AS pos, t.side, t.reason,
+         printf('%.4f', t.sol_amount) AS sol,
+         datetime(t.executed_at,'unixepoch','localtime') AS time
+  FROM trades t ORDER BY t.executed_at DESC LIMIT 30;"
+```
