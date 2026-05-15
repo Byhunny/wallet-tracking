@@ -76,6 +76,10 @@ type TradingConfig struct {
 	// peak gain (peak/entry - 1)*100 reaches this threshold. Stops trailing
 	// from firing on entry-time wobble. Set 0 to arm immediately.
 	TrailingArmAtPct float64 `yaml:"trailing_arm_at_pct"`
+	// BreakevenAfterSteps moves the stop-loss to entry once this many ladder
+	// rungs have fired. Locks in the partial profit — the position can't
+	// return to a net loss after that point. 0 disables break-even logic.
+	BreakevenAfterSteps int `yaml:"breakeven_after_steps"`
 	// IgnoreWalletExit decouples our exit from the followed wallet's: when
 	// true, a wallet sell-out only emits a notification and we keep running
 	// our own ladder/stop-loss until they fire.

@@ -36,6 +36,10 @@ type Position struct {
 	// trailing becomes active. Default 0 means "always armed" — usually you
 	// want a small buffer (e.g. 20) so trailing doesn't fire on entry noise.
 	TrailingArmAtPct float64
+	// BreakevenAfterSteps switches the stop-loss target from -StopLossPct to
+	// entry once StepsHit reaches this number. Once we've banked enough
+	// profit via the ladder, the position should never go negative.
+	BreakevenAfterSteps int
 }
 
 type ActionKind int
@@ -92,6 +96,16 @@ func Evaluate(p Position, currentPrice float64) Action {
 	// Stop-loss takes priority. Triggers when loss reaches the configured
 	// threshold; sells everything remaining at market.
 	if p.StopLossPct > 0 && gainPct <= -p.StopLossPct+1e-9 {
+		return Action{
+			Kind:        ActionStopLoss,
+			TokenAmount: p.RemainingAmount,
+		}
+	}
+
+	// Break-even stop: once enough ladder rungs have banked profit, the
+	// position can't be allowed to go negative. Fire stop-loss the moment
+	// price slips to or below entry.
+	if p.BreakevenAfterSteps > 0 && p.StepsHit >= p.BreakevenAfterSteps && gainPct <= 1e-9 {
 		return Action{
 			Kind:        ActionStopLoss,
 			TokenAmount: p.RemainingAmount,

@@ -14,27 +14,30 @@ trading:
   # fixed_position_sol: 1.0     # uncomment to use a constant per-buy SOL spend (overrides ratio)
 
   # Take-profit ladder. List of {at: gain_pct, sell: pct_of_initial} rungs.
+  # Front-loaded: most pumps die in the 30-100% range, so bank more early.
   # Each rung fires once when the threshold is crossed; multiple rungs can
   # fire on a single price tick if price jumps past several at once.
-  # Wallet exit (if not ignored) sells anything left.
   ladder:
-    - { at: 10, sell: 10 }
-    - { at: 20, sell: 10 }
-    - { at: 30, sell: 10 }
-    - { at: 40, sell: 10 }
-    - { at: 50, sell: 10 }
-    - { at: 60, sell: 10 }
-    - { at: 70, sell: 10 }
-    - { at: 80, sell: 10 }
-    - { at: 90, sell: 10 }
-    # final 10% is held: trailing_stop or wallet exit will take it
+    - { at: 10, sell: 15 }   # bank quickly — 15% out
+    - { at: 20, sell: 15 }   # 30% banked
+    - { at: 35, sell: 15 }   # 45% banked
+    - { at: 55, sell: 10 }   # 55% banked
+    - { at: 80, sell: 10 }   # 65% banked
+    - { at: 120, sell: 10 }  # 75% banked
+    - { at: 180, sell: 10 }  # 85% banked
+    - { at: 300, sell: 5 }   # 90% banked
+    # remaining 10% rides with trailing_stop for moonshot capture
 
   # Risk controls — tuned from real PnL data (live samples).
   stop_loss_pct: 20             # exit everything if price drops 20% from entry
   trailing_stop_pct: 25         # exit everything if price drops 25% from peak…
-  trailing_arm_at_pct: 30       # …once peak gain has cleared +30%
+  trailing_arm_at_pct: 10       # …once peak gain has cleared +10% (low so a
+                                # tiny win is locked in before reversal)
+  breakeven_after_steps: 3      # after 3 ladder rungs banked, exit on entry-
+                                # price touch (no losses once we're up)
   ignore_wallet_exit: true      # let stop_loss/trailing/ladder own the exit;
-                                # wallet exits become notify-only
+                                # wallet full-exits trigger an immediate price
+                                # check (no waiting for next poll)
   entry_delay_seconds: 3        # observe the wallet for N seconds before
                                 # entering — if it exits within the window,
                                 # cancel the pending buy (anti-flip filter)
@@ -49,7 +52,7 @@ trading:
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
 
 price:
-  poll_interval_seconds: 5
+  poll_interval_seconds: 2      # faster polling = stop_loss reacts faster
   # lite-api is keyless but rate-limited (~1 req/sec). For heavier traffic
   # set JUPITER_API_KEY env and swap these to https://api.jup.ag/swap/v1/...
   jupiter_quote_url: "https://lite-api.jup.ag/swap/v1/quote"

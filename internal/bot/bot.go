@@ -325,11 +325,13 @@ func (b *Bot) handleWalletSell(ctx context.Context, ev *parser.SwapEvent) {
 		return
 	}
 
-	// When ignore_wallet_exit is on, we run our own exit logic (ladder + stop
-	// loss) regardless of what the followed wallet does. Just notify.
+	// When ignore_wallet_exit is on, we run our own exit logic. But we don't
+	// want to wait up to poll_interval for stop-loss to react — fire an
+	// immediate price check for this mint, which feeds the strategy loop.
 	if b.cfg.Trading.IgnoreWalletExit {
-		b.notify(fmt.Sprintf("ℹ️ Wallet EXIT %s — biz ladder/stop-loss ile devam ediyoruz (ignore_wallet_exit on)",
+		b.notify(fmt.Sprintf("ℹ️ Wallet EXIT %s — anlık fiyat kontrolü yapılıyor (ignore_wallet_exit on)",
 			short(ev.Mint)))
+		go b.triggerImmediatePriceCheck(ctx, pos.Mint, pos.Decimals, pos.RemainingAmount)
 		return
 	}
 
@@ -374,16 +376,17 @@ func (b *Bot) handlePriceTick(ctx context.Context, t priceTick) {
 	}
 
 	action := strategy.Evaluate(strategy.Position{
-		EntryPrice:       pos.EntryPriceSOL,
-		PeakPrice:        pos.PeakPriceSOL,
-		InitialAmount:    pos.InitialAmount,
-		RemainingAmount:  pos.RemainingAmount,
-		StepsHit:         pos.StepsHit,
-		Ladder:           b.ladderForStrategy(),
-		WalletExited:     pos.WalletExited,
-		StopLossPct:      b.cfg.Trading.StopLossPct,
-		TrailingStopPct:  b.cfg.Trading.TrailingStopPct,
-		TrailingArmAtPct: b.cfg.Trading.TrailingArmAtPct,
+		EntryPrice:          pos.EntryPriceSOL,
+		PeakPrice:           pos.PeakPriceSOL,
+		InitialAmount:       pos.InitialAmount,
+		RemainingAmount:     pos.RemainingAmount,
+		StepsHit:            pos.StepsHit,
+		Ladder:              b.ladderForStrategy(),
+		WalletExited:        pos.WalletExited,
+		StopLossPct:         b.cfg.Trading.StopLossPct,
+		TrailingStopPct:     b.cfg.Trading.TrailingStopPct,
+		TrailingArmAtPct:    b.cfg.Trading.TrailingArmAtPct,
+		BreakevenAfterSteps: b.cfg.Trading.BreakevenAfterSteps,
 	}, t.priceSOL)
 
 	switch action.Kind {
@@ -581,6 +584,35 @@ func pow10(n int) float64 {
 		v *= 10
 	}
 	return v
+}
+
+// triggerImmediatePriceCheck quotes a sell on the position's remaining tokens
+// right now and pushes the resulting price into the main loop. Used when the
+// followed wallet exits in ignore_wallet_exit mode — we don't want stop-loss
+// to wait for the next 5-second poll while the price is gapping down.
+func (b *Bot) triggerImmediatePriceCheck(parent context.Context, mint string, decimals int, remainingAmount float64) {
+	if remainingAmount <= 0 {
+		return
+	}
+	rawAmount := uint64(math.Floor(remainingAmount * pow10(decimals)))
+	if rawAmount == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+	q, err := b.jup.QuoteSellToSOL(ctx, mint, rawAmount, b.cfg.Trading.SlippageBPS)
+	if err != nil {
+		b.log.Debug("immediate quote failed", "mint", mint, "err", err)
+		return
+	}
+	price := pricefeed.PriceSOLPerToken(q, decimals)
+	if price <= 0 {
+		return
+	}
+	select {
+	case b.priceCh <- priceTick{mint: mint, decimals: decimals, priceSOL: price}:
+	case <-parent.Done():
+	}
 }
 
 // ladderForStrategy converts the config-level ladder into the strategy

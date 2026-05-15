@@ -265,6 +265,43 @@ func TestEvaluate_TrailingStop_BelowDrawdown(t *testing.T) {
 	}
 }
 
+func TestEvaluate_BreakevenStopFires(t *testing.T) {
+	p := basePos()
+	p.StepsHit = 3
+	p.RemainingAmount = 700
+	p.BreakevenAfterSteps = 3
+	// Price back to entry — banked enough, no losses allowed
+	a := Evaluate(p, 1.0)
+	if a.Kind != ActionStopLoss {
+		t.Fatalf("want stop_loss at breakeven, got %v", a.Kind)
+	}
+	if !approxEq(a.TokenAmount, 700) {
+		t.Fatalf("want full remaining, got %v", a.TokenAmount)
+	}
+}
+
+func TestEvaluate_BreakevenStopNotArmed(t *testing.T) {
+	p := basePos()
+	p.StepsHit = 2
+	p.RemainingAmount = 800
+	p.BreakevenAfterSteps = 3
+	// Only 2 steps banked, need 3 to arm break-even. Price at entry — no fire.
+	if a := Evaluate(p, 1.0); a.Kind != ActionNone {
+		t.Fatalf("want none with only 2 steps banked, got %v", a.Kind)
+	}
+}
+
+func TestEvaluate_BreakevenStopNotFiredAbove(t *testing.T) {
+	p := basePos()
+	p.StepsHit = 5
+	p.RemainingAmount = 500
+	p.BreakevenAfterSteps = 3
+	// Price up +5% — still positive, break-even doesn't fire
+	if a := Evaluate(p, 1.05); a.Kind == ActionStopLoss {
+		t.Fatalf("breakeven should not fire above entry, got %v", a)
+	}
+}
+
 func TestEvaluate_StopLossBeatsTrailing(t *testing.T) {
 	// Both conditions can theoretically fire at once; stop loss must win
 	// because it represents the more pessimistic floor (capital protection).
