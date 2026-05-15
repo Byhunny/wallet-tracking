@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,11 @@ type Bot struct {
 	swapCh   chan *parser.SwapEvent
 	priceCh  chan priceTick
 	panicReq chan chan panicResult
+
+	// pendingBuys tracks delayed buys (anti-flip filter). Keyed by mint; the
+	// channel is closed to cancel the entry before it executes.
+	pendingMu   sync.Mutex
+	pendingBuys map[string]chan struct{}
 }
 
 type priceTick struct {
@@ -57,16 +63,17 @@ func New(
 	exec executor.Executor, watch *watcher.Watcher, botPubkey string,
 ) *Bot {
 	return &Bot{
-		cfg:      cfg,
-		log:      log,
-		db:       db,
-		jup:      jup,
-		exec:     exec,
-		watch:    watch,
-		botPub:   botPubkey,
-		swapCh:   make(chan *parser.SwapEvent, 32),
-		priceCh:  make(chan priceTick, 64),
-		panicReq: make(chan chan panicResult, 1),
+		cfg:         cfg,
+		log:         log,
+		db:          db,
+		jup:         jup,
+		exec:        exec,
+		watch:       watch,
+		botPub:      botPubkey,
+		swapCh:      make(chan *parser.SwapEvent, 32),
+		priceCh:     make(chan priceTick, 64),
+		panicReq:    make(chan chan panicResult, 1),
+		pendingBuys: make(map[string]chan struct{}),
 	}
 }
 
@@ -208,10 +215,50 @@ func (b *Bot) handleWalletBuy(ctx context.Context, ev *parser.SwapEvent) {
 		}
 	}
 
-	lamports := uint64(math.Floor(botSOL * 1e9))
+	delay := time.Duration(b.cfg.Trading.EntryDelaySeconds) * time.Second
+	if delay > 0 {
+		b.notify(fmt.Sprintf("🟢 Wallet BUY %s\nWallet: %.4f SOL → biz %.4f SOL, %ds gözlem (flip filter)…",
+			short(ev.Mint), walletSpent, botSOL, b.cfg.Trading.EntryDelaySeconds))
+		b.scheduleBuy(ctx, ev, walletSpent, botSOL, delay)
+		return
+	}
 
-	b.notify(fmt.Sprintf("🟢 Wallet BUY %s\nWallet: %.4f SOL → biz sabit %.4f SOL alıyoruz…",
+	b.notify(fmt.Sprintf("🟢 Wallet BUY %s\nWallet: %.4f SOL → biz %.4f SOL alıyoruz…",
 		short(ev.Mint), walletSpent, botSOL))
+	b.executeWalletBuy(ctx, ev, botSOL)
+}
+
+// scheduleBuy holds a pending entry for `delay` so that wallet-exit events
+// arriving in the window can cancel us — that's the anti-flip filter. A
+// single goroutine per pending mint; previous pending for the same mint
+// gets superseded.
+func (b *Bot) scheduleBuy(ctx context.Context, ev *parser.SwapEvent, walletSpent, botSOL float64, delay time.Duration) {
+	cancel := make(chan struct{})
+	b.pendingMu.Lock()
+	if old, ok := b.pendingBuys[ev.Mint]; ok {
+		close(old) // supersede earlier pending for same mint
+	}
+	b.pendingBuys[ev.Mint] = cancel
+	b.pendingMu.Unlock()
+
+	go func() {
+		select {
+		case <-time.After(delay):
+			b.pendingMu.Lock()
+			if b.pendingBuys[ev.Mint] == cancel {
+				delete(b.pendingBuys, ev.Mint)
+			}
+			b.pendingMu.Unlock()
+			b.executeWalletBuy(ctx, ev, botSOL)
+		case <-cancel:
+			b.notify(fmt.Sprintf("⏭ %s gözlem süresinde wallet çıktı — flip filter iptal etti.", short(ev.Mint)))
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func (b *Bot) executeWalletBuy(ctx context.Context, ev *parser.SwapEvent, botSOL float64) {
+	lamports := uint64(math.Floor(botSOL * 1e9))
 
 	fill, err := b.exec.Buy(ctx, ev.Mint, ev.Decimals, lamports, "wallet_buy")
 	if err != nil {
@@ -250,6 +297,19 @@ func (b *Bot) handleWalletBuy(ctx context.Context, ev *parser.SwapEvent) {
 }
 
 func (b *Bot) handleWalletSell(ctx context.Context, ev *parser.SwapEvent) {
+	// If there's a pending buy for this mint and the wallet just fully
+	// exited, cancel the entry — this is the anti-flip filter.
+	if ev.FullExit {
+		b.pendingMu.Lock()
+		if cancel, ok := b.pendingBuys[ev.Mint]; ok {
+			delete(b.pendingBuys, ev.Mint)
+			close(cancel)
+			b.pendingMu.Unlock()
+			return
+		}
+		b.pendingMu.Unlock()
+	}
+
 	pos, err := b.db.ActivePosition(ctx, ev.Mint)
 	if errors.Is(err, store.ErrNotFound) {
 		return

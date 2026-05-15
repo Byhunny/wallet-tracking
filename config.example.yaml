@@ -29,11 +29,15 @@ trading:
     - { at: 90, sell: 10 }
     # final 10% is held: trailing_stop or wallet exit will take it
 
-  # Risk controls — tuned from real PnL data (48 trades sample):
+  # Risk controls — tuned from real PnL data (live samples).
   stop_loss_pct: 20             # exit everything if price drops 20% from entry
   trailing_stop_pct: 25         # exit everything if price drops 25% from peak…
   trailing_arm_at_pct: 30       # …once peak gain has cleared +30%
-  ignore_wallet_exit: false     # set true to detach our exit logic from wallet's
+  ignore_wallet_exit: true      # let stop_loss/trailing/ladder own the exit;
+                                # wallet exits become notify-only
+  entry_delay_seconds: 3        # observe the wallet for N seconds before
+                                # entering — if it exits within the window,
+                                # cancel the pending buy (anti-flip filter)
 
   slippage_bps: 500             # 5%
   priority_fee_microlamports: 100000

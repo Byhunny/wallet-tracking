@@ -80,6 +80,10 @@ type TradingConfig struct {
 	// true, a wallet sell-out only emits a notification and we keep running
 	// our own ladder/stop-loss until they fire.
 	IgnoreWalletExit bool `yaml:"ignore_wallet_exit"`
+	// EntryDelaySeconds defers our buy after we see the wallet's buy. If the
+	// wallet exits during the delay, the pending entry is canceled — this
+	// filters out same-block flippers / MEV patterns. 0 disables the delay.
+	EntryDelaySeconds int `yaml:"entry_delay_seconds"`
 	// Legacy linear ladder — used only when `ladder` is not set.
 	LadderStepPct            float64  `yaml:"ladder_step_pct"`
 	LadderStepCount          int      `yaml:"ladder_step_count"`
@@ -221,6 +225,9 @@ func (c *Config) validate() error {
 	}
 	if c.Trading.TrailingArmAtPct < 0 {
 		return fmt.Errorf("trading.trailing_arm_at_pct must be >= 0")
+	}
+	if c.Trading.EntryDelaySeconds < 0 || c.Trading.EntryDelaySeconds > 60 {
+		return fmt.Errorf("trading.entry_delay_seconds must be in [0,60], got %d", c.Trading.EntryDelaySeconds)
 	}
 	if c.Trading.SlippageBPS < 0 || c.Trading.SlippageBPS > 10000 {
 		return fmt.Errorf("trading.slippage_bps must be in [0,10000]")
