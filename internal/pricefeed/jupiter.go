@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -36,22 +37,59 @@ type Client struct {
 	swapURL  string
 	apiKey   string
 	http     *http.Client
+
+	// Client-side rate gate: enforce a minimum gap between outbound requests so
+	// concurrent positions/ticks don't burst past Jupiter's per-second limit
+	// (lite-api is ~1 req/s; the authenticated endpoint is higher).
+	mu       sync.Mutex
+	nextSlot time.Time
+	minGap   time.Duration
 }
+
+// keyless lite-api allows ~1 req/s; leave headroom.
+const defaultMinGap = 1100 * time.Millisecond
 
 func New(quoteURL, swapURL string) *Client {
 	return &Client{
 		quoteURL: quoteURL,
 		swapURL:  swapURL,
 		http:     &http.Client{Timeout: 15 * time.Second},
+		minGap:   defaultMinGap,
 	}
 }
 
 // WithAPIKey enables authenticated access (api.jup.ag) by attaching an
 // `Authorization: Bearer <key>` header to every request. Passing an empty
-// key is a no-op (request goes through unauthenticated).
+// key is a no-op (request goes through unauthenticated). An authenticated
+// endpoint tolerates a faster request cadence.
 func (c *Client) WithAPIKey(key string) *Client {
 	c.apiKey = key
+	if key != "" {
+		c.minGap = 250 * time.Millisecond
+	}
 	return c
+}
+
+// gate blocks until the next request slot is available, throttling all callers
+// to at most one request per minGap.
+func (c *Client) gate(ctx context.Context) error {
+	c.mu.Lock()
+	now := time.Now()
+	if c.nextSlot.Before(now) {
+		c.nextSlot = now
+	}
+	wait := c.nextSlot.Sub(now)
+	c.nextSlot = c.nextSlot.Add(c.minGap)
+	c.mu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
 }
 
 // QuoteSellToSOL returns a quote for selling tokenRawAmount of `mint` to SOL.
@@ -163,11 +201,15 @@ func (c *Client) SwapTransaction(ctx context.Context, quote *Quote, userPubkey s
 // doWithRetry runs an HTTP request and retries on 429 / 5xx with exponential
 // backoff. Returns the response body bytes on 2xx.
 func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, body []byte, contentType string) ([]byte, error) {
-	const maxAttempts = 4
+	const maxAttempts = 6
 	backoff := 700 * time.Millisecond
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := c.gate(ctx); err != nil {
+			return nil, err
+		}
+
 		var reqBody io.Reader
 		if body != nil {
 			reqBody = bytes.NewReader(body)
@@ -183,11 +225,13 @@ func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, body []
 			req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		}
 
+		wait := backoff
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = err
 		} else {
 			respBody, _ := io.ReadAll(resp.Body)
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
 
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -200,23 +244,42 @@ func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, body []
 			if !retryable {
 				return nil, lastErr
 			}
+			// Honor server-provided Retry-After when it asks for longer.
+			if retryAfter > wait {
+				wait = retryAfter
+			}
 		}
 
 		if attempt == maxAttempts {
 			break
 		}
-		// Backoff with a small ceiling so we don't outlive a wallet's pump.
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
 		backoff *= 2
-		if backoff > 5*time.Second {
-			backoff = 5 * time.Second
+		if backoff > 8*time.Second {
+			backoff = 8 * time.Second
 		}
 	}
 	return nil, lastErr
+}
+
+// parseRetryAfter reads a Retry-After header expressed in seconds. Returns 0
+// if absent or unparseable.
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	if secs > 30 {
+		secs = 30
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // PriceSOLPerToken converts a sell-quote into a SOL-per-1-token price.

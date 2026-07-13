@@ -53,8 +53,12 @@ func main() {
 	var botPub string
 	switch cfg.Mode {
 	case config.ModeSimulation:
-		exec = executor.NewSimulator(jup, cfg.Trading.SlippageBPS)
-		log.Info("simulation mode — quote-only paper trade, no on-chain interaction")
+		// Estimate a per-swap fee so paper PnL is realistic: 5000-lamport base
+		// network fee + the configured priority-fee cap (maxLamports).
+		txFee := uint64(5000) + cfg.Trading.PriorityFeeMicroLamports/1000
+		exec = executor.NewSimulator(jup, cfg.Trading.SlippageBPS, txFee)
+		log.Info("simulation mode — quote-only paper trade, no on-chain interaction",
+			"est_tx_fee_lamports", txFee)
 	case config.ModeSimulateTx:
 		simTx, err := executor.NewJupiterSimulateTx(
 			jup,
