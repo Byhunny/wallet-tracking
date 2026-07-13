@@ -10,7 +10,8 @@ wallet:
   # bot's private key is read from env: BOT_PRIVATE_KEY (base58, only used in live mode)
 
 trading:
-  position_size_ratio: 0.10     # bot spends 1/10 of follow wallet's SOL per buy
+  position_size_ratio: 1.0      # 1:1 — mirror the wallet's exact SOL spend per buy
+                                # (this wallet doesn't oversize buys, so copy it fully)
   # fixed_position_sol: 1.0     # uncomment to use a constant per-buy SOL spend (overrides ratio)
 
   # Take-profit ladder. List of {at: gain_pct, sell: pct_of_initial} rungs.
