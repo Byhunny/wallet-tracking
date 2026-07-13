@@ -17,15 +17,14 @@ trading:
   # Front-loaded: most pumps die in the 30-100% range, so bank more early.
   # Each rung fires once when the threshold is crossed; multiple rungs can
   # fire on a single price tick if price jumps past several at once.
+  # NOTE: every rung is one on-chain tx (~0.0002 SOL with a realistic priority
+  # fee). Fewer, larger rungs keep fee friction sane on small positions.
   ladder:
-    - { at: 10, sell: 15 }   # bank quickly — 15% out
-    - { at: 20, sell: 15 }   # 30% banked
-    - { at: 35, sell: 15 }   # 45% banked
-    - { at: 55, sell: 10 }   # 55% banked
-    - { at: 80, sell: 10 }   # 65% banked
-    - { at: 120, sell: 10 }  # 75% banked
-    - { at: 180, sell: 10 }  # 85% banked
-    - { at: 300, sell: 5 }   # 90% banked
+    - { at: 12, sell: 25 }   # bank fast — 25% out in one tx
+    - { at: 30, sell: 20 }   # 45% banked
+    - { at: 60, sell: 20 }   # 65% banked
+    - { at: 120, sell: 15 }  # 80% banked
+    - { at: 250, sell: 10 }  # 90% banked
     # remaining 10% rides with trailing_stop for moonshot capture
 
   # Risk controls — tuned from real PnL data (live samples).
@@ -33,8 +32,8 @@ trading:
   trailing_stop_pct: 25         # exit everything if price drops 25% from peak…
   trailing_arm_at_pct: 10       # …once peak gain has cleared +10% (low so a
                                 # tiny win is locked in before reversal)
-  breakeven_after_steps: 3      # after 3 ladder rungs banked, exit on entry-
-                                # price touch (no losses once we're up)
+  breakeven_after_steps: 2      # after 2 ladder rungs banked (45% out), exit on
+                                # entry-price touch (no losses once we're up)
   ignore_wallet_exit: true      # let stop_loss/trailing/ladder own the exit;
                                 # wallet full-exits trigger an immediate price
                                 # check (no waiting for next poll)
@@ -43,8 +42,12 @@ trading:
                                 # cancel the pending buy (anti-flip filter)
 
   slippage_bps: 500             # 5%
-  priority_fee_microlamports: 100000
-  min_position_sol: 0.01        # skip below this
+  # Priority-fee CAP per swap tx: maxLamports = this / 1000. 200M µlamports =
+  # 200k lamports = 0.0002 SOL (~$0.03) — enough to land on hot memecoin
+  # accounts; Jupiter's "high" priority level only bids what's needed under it.
+  # The old 100000 (=100 lamports) was far too low to land under contention.
+  priority_fee_microlamports: 200000000
+  min_position_sol: 0.03        # below this, per-tx fees eat >5% of the position
   max_position_sol: 5.0         # cap above this
   excluded_mints:
     - "So11111111111111111111111111111111111111112"  # wSOL
